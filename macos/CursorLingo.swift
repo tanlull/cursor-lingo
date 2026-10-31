@@ -1048,7 +1048,8 @@ final class Presenter {
         }
         CATransaction.commit()
         let half = ringPanel.frame.width / 2
-        ringPanel.setFrameOrigin(NSPoint(x: (p.x - half).rounded(), y: (p.y - half).rounded()))
+        let origin = NSPoint(x: (p.x - half).rounded(), y: (p.y - half).rounded())
+        if ringPanel.frame.origin != origin { ringPanel.setFrameOrigin(origin) }
         if zoom {
             if !feedScreen.contains(p) { capture(screenAt: p) }
             aimLens()
@@ -1176,10 +1177,11 @@ final class ScreenFeed: NSObject, SCStreamOutput, SCStreamDelegate {
                 let config = SCStreamConfiguration()
                 config.width = Int(CGFloat(display.width) * scale)
                 config.height = Int(CGFloat(display.height) * scale)
-                config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                // The lens needs readable screen content, rather than a full-rate recording.
+                config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.showsCursor = false  // the real pointer is drawn on top anyway
-                config.queueDepth = 4
+                config.queueDepth = 3  // ScreenCaptureKit's default; avoid an extra full-display surface
                 let stream = SCStream(filter: filter, configuration: config, delegate: self)
                 do {
                     try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
@@ -2278,6 +2280,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let badge = BadgeView(frame: .zero)
     private var statusItem: NSStatusItem!
     private var monitors: [Any] = []
+    private var followWork: DispatchWorkItem?
+    private var lastFollowTime: TimeInterval = 0
     private var hideWork: DispatchWorkItem?
     private var screenFrames: [NSRect] = []
     private var badgeSize = NSSize.zero
@@ -2327,10 +2331,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow.app = self
 
         let mouseEvents: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents, handler: { [weak self] _ in self?.follow() }) {
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents, handler: { [weak self] _ in self?.scheduleFollow() }) {
             monitors.append(m)
         }
-        if let m = NSEvent.addLocalMonitorForEvents(matching: mouseEvents, handler: { [weak self] e in self?.follow(); return e }) {
+        if let m = NSEvent.addLocalMonitorForEvents(matching: mouseEvents, handler: { [weak self] e in self?.scheduleFollow(); return e }) {
             monitors.append(m)
         }
 
@@ -2403,6 +2407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        followWork?.cancel()
         monitors.forEach(NSEvent.removeMonitor)
     }
 
@@ -2428,8 +2433,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         presenter.screensChanged()
     }
 
-    /// Repositions the badge under the pointer. Called for every mouse event, so it stays allocation-free.
+    /// Coalesce high-rate mouse events into at most 60 visual updates per second. Read the pointer when
+    /// delivering the update, so the final movement is never lost. No repeating timer runs while idle.
+    private func scheduleFollow() {
+        guard visible || presenter.isOn, followWork == nil else { return }
+        let delay = 1.0 / 60.0 - (ProcessInfo.processInfo.systemUptime - lastFollowTime)
+        if delay <= 0 {
+            follow()
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.followWork = nil
+            self.follow()
+        }
+        followWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Repositions the badge under the latest pointer position; explicit visibility changes update immediately.
     private func follow() {
+        lastFollowTime = ProcessInfo.processInfo.systemUptime
         let p = NSEvent.mouseLocation
         presenter.follow(p)
         guard visible else { return }
@@ -2441,7 +2465,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var y = p.y - 22 * s - badgeSize.height / 2
         if x + badgeSize.width > frame.maxX { x = p.x - 8 * s - badgeSize.width }   // flip left
         if y < frame.minY { y = p.y + 8 * s }                                         // flip up
-        panel.setFrameOrigin(NSPoint(x: x.rounded(), y: y.rounded()))
+        let origin = NSPoint(x: x.rounded(), y: y.rounded())
+        if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
     }
 
     @objc private func inputSourceChanged() {

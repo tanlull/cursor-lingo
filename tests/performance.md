@@ -5,6 +5,11 @@ how they were measured, and what is still to be measured.
 
 ## macOS
 
+The current source caps pointer-follow updates at 60 per second, captures zoom frames at up to 30 fps,
+and uses a three-frame capture queue instead of four. Pointer updates are scheduled only after mouse events;
+there is no repeating idle timer. The measurements below predate these changes and must be rerun before
+claiming CPU or memory savings. In particular, check smoothness on high-refresh displays and zooming video.
+
 Apple M5, macOS 27.0.1, release build (`./macos/build.sh`), measured 2026-10-28 with
 [`tests/perf/measure-macos.sh`](perf/measure-macos.sh), run twice. CPU is the share of one core over 20 s; memory is
 the physical footprint (`footprint`), which is what Activity Monitor calls Memory. The script exports the
